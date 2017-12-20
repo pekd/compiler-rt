@@ -12,6 +12,9 @@
 // ASan functions for getting information about an address and/or printing it.
 //===----------------------------------------------------------------------===//
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "asan_descriptions.h"
 #include "asan_mapping.h"
 #include "asan_report.h"
@@ -507,4 +510,124 @@ void PrintAddressDescription(uptr addr, uptr access_size,
       "AddressSanitizer can not describe address in more detail "
       "(wild memory access suspected).\n");
 }
+
+static bool __asan_get_address_info(void* ptr, void** start, void** end, size_t* size)
+{
+	uptr addr = (uptr) ptr;
+
+	*start = NULL;
+	*end = NULL;
+	*size = (size_t)-1;
+
+	ShadowAddressDescription shadow_descr;
+	if(GetShadowAddressInformation(addr, &shadow_descr)) {
+		Printf("Unsupported [ShadowAddressDescription]!\n");
+		return false;
+	}
+
+	GlobalAddressDescription global_descr;
+	if(GetGlobalAddressInformation(addr, 1, &global_descr)) {
+		uptr a;
+		if(global_descr.size > 0) {
+			a = global_descr.globals[0].beg;
+			*start = (void*) global_descr.globals[0].beg;
+			*end = (void*) (global_descr.globals[0].beg + global_descr.globals[0].size);
+			*size = (size_t) global_descr.globals[0].size;
+		}
+		for(int i = 1; i < global_descr.size; i++) {
+			const __asan_global& g = global_descr.globals[i];
+			if(g.beg <= a) {
+				a = g.beg;
+				*start = (void*) g.beg;
+				*end = (void*) (g.beg + g.size);
+				*size = (size_t) g.size;
+			}
+		}
+		return true;
+	}
+
+	StackAddressDescription stack_descr;
+	if(GetStackAddressInformation(addr, 1, &stack_descr)) {
+		uptr off = stack_descr.addr - stack_descr.offset;
+
+		InternalMmapVector<StackVarDescr> vars(16);
+		if(!ParseFrameDescription(stack_descr.frame_descr, &vars)) {
+			Printf("AddressSanitizer can't parse the stack frame "
+			       "descriptor: |%s|\n", stack_descr.frame_descr);
+			return false;
+		}
+		uptr n_objects = vars.size();
+
+		uptr a;
+		if(n_objects > 0) {
+			a = vars[0].beg;
+			*start = (void*) (off + vars[0].beg);
+			*end = (void*) (off + vars[0].beg + vars[0].size);
+			*size = (size_t) vars[0].size;
+		}
+		// Report all objects in this frame.
+		for (uptr i = 0; i < n_objects; i++) {
+			if(vars[i].beg <= a) {
+				a = vars[i].beg;
+				*start = (void*) (off + vars[i].beg);
+				*end = (void*) (off + vars[i].beg + vars[i].size);
+				*size = (size_t) vars[i].size;
+			}
+		}
+		return true;
+	}
+
+	HeapAddressDescription heap_descr;
+	if(GetHeapAddressInformation(addr, 1, &heap_descr)) {
+		*start = (void*) heap_descr.chunk_access.chunk_begin;
+		*end = (void*) (heap_descr.chunk_access.chunk_begin + heap_descr.chunk_access.chunk_size);
+		*size = (size_t) heap_descr.chunk_access.chunk_size;
+		return true;
+	}
+
+	Printf("Unsupported [unknown]\n");
+	return false;
+}
+
+extern "C" {
+size_t _size(void* p)
+{
+	void* start;
+	void* end;
+	size_t size = (size_t)-1;
+
+	asanThreadRegistry().Lock();
+	bool ok = __asan_get_address_info(p, &start, &end, &size);
+	asanThreadRegistry().Unlock();
+
+	return ok ? size : SIZE_MAX;
+}
+
+size_t _size_left(void* p)
+{
+	void* start;
+	void* end;
+	size_t size = (size_t)-1;
+
+	asanThreadRegistry().Lock();
+	bool ok = __asan_get_address_info(p, &start, &end, &size);
+	asanThreadRegistry().Unlock();
+
+	return ok ? (long) ((char*)p - (char*)start) : SIZE_MAX;
+}
+
+size_t _size_right(void* p)
+{
+	void* start;
+	void* end;
+	size_t size = (size_t)-1;
+
+	asanThreadRegistry().Lock();
+	bool ok = __asan_get_address_info(p, &start, &end, &size);
+	asanThreadRegistry().Unlock();
+
+	return ok ? (long) ((char*)end - (char*)p) : SIZE_MAX;
+}
+}
+
 }  // namespace __asan
