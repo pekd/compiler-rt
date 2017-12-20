@@ -14,6 +14,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <unistd.h>
+#include <limits.h>
 
 #include "asan_descriptions.h"
 #include "asan_mapping.h"
@@ -558,20 +560,35 @@ static bool __asan_get_address_info(void* ptr, void** start, void** end, size_t*
 		}
 		uptr n_objects = vars.size();
 
-		uptr a;
-		if(n_objects > 0) {
-			a = vars[0].beg;
-			*start = (void*) (off + vars[0].beg);
-			*end = (void*) (off + vars[0].beg + vars[0].size);
-			*size = (size_t) vars[0].size;
-		}
 		// Report all objects in this frame.
 		for (uptr i = 0; i < n_objects; i++) {
-			if(vars[i].beg <= a) {
-				a = vars[i].beg;
-				*start = (void*) (off + vars[i].beg);
-				*end = (void*) (off + vars[i].beg + vars[i].size);
-				*size = (size_t) vars[i].size;
+			StackVarDescr& var = vars[i];
+			uptr a = stack_descr.offset;
+			uptr prev_var_end = i ? vars[i - 1].beg + vars[i - 1].size : 0;
+			uptr next_var_beg = i + 1 < n_objects ? vars[i + 1].beg : ~(0UL);
+			uptr var_end = var.beg + var.size;
+			uptr addr_end = a + 1;
+			bool found = false;
+			// If the variable [var.beg, var_end) is the nearest variable to the
+			// current memory access, indicate it in the log.
+			if (a >= var.beg) {
+				if(addr_end <= var_end) // "is inside"
+					found = true;
+				else if(a < var_end) // "partially overflows"
+					found = true;
+				else if(addr_end <= next_var_beg && next_var_beg - addr_end >= a - var_end) // "overflows"
+					found = true;
+			} else {
+				if(addr_end > var.beg) // "partially underflows"
+					found = true;
+				else if(a >= prev_var_end && a - prev_var_end >= var.beg - addr_end) // "underflows"
+					found = true;
+			}
+			if(found) {
+				*start = (void*) (off + var.beg);
+				*end = (void*) (off + var_end);
+				*size = (size_t) var.size;
+				break;
 			}
 		}
 		return true;
@@ -590,11 +607,12 @@ static bool __asan_get_address_info(void* ptr, void** start, void** end, size_t*
 }
 
 extern "C" {
+
 size_t _size(void* p)
 {
 	void* start;
 	void* end;
-	size_t size = (size_t)-1;
+	size_t size;
 
 	asanThreadRegistry().Lock();
 	bool ok = __asan_get_address_info(p, &start, &end, &size);
@@ -603,30 +621,30 @@ size_t _size(void* p)
 	return ok ? size : SIZE_MAX;
 }
 
-size_t _size_left(void* p)
+ssize_t _size_left(void* p)
 {
 	void* start;
 	void* end;
-	size_t size = (size_t)-1;
+	size_t size;
 
 	asanThreadRegistry().Lock();
 	bool ok = __asan_get_address_info(p, &start, &end, &size);
 	asanThreadRegistry().Unlock();
 
-	return ok ? (long) ((char*)p - (char*)start) : SIZE_MAX;
+	return ok ? (ssize_t) ((char*)p - (char*)start) : SSIZE_MAX;
 }
 
-size_t _size_right(void* p)
+ssize_t _size_right(void* p)
 {
 	void* start;
 	void* end;
-	size_t size = (size_t)-1;
+	size_t size;
 
 	asanThreadRegistry().Lock();
 	bool ok = __asan_get_address_info(p, &start, &end, &size);
 	asanThreadRegistry().Unlock();
 
-	return ok ? (long) ((char*)end - (char*)p) : SIZE_MAX;
+	return ok ? (ssize_t) ((char*)end - (char*)p) : SSIZE_MAX;
 }
 }
 
