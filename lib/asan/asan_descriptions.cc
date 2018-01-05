@@ -533,7 +533,8 @@ static bool __asan_get_address_info(void* ptr, void** start, void** end, size_t*
 		if(global_descr.size > 0) {
 			a = global_descr.globals[0].beg;
 			*start = (void*) global_descr.globals[0].beg;
-			*end = (void*) (global_descr.globals[0].beg + global_descr.globals[0].size);
+			*end = (void*) (global_descr.globals[0].beg +
+					global_descr.globals[0].size);
 			*size = (size_t) global_descr.globals[0].size;
 		}
 		for(int i = 1; i < global_descr.size; i++) {
@@ -548,11 +549,28 @@ static bool __asan_get_address_info(void* ptr, void** start, void** end, size_t*
 		return true;
 	}
 
+	HeapAddressDescription heap_descr;
+	if(GetHeapAddressInformation(addr, 1, &heap_descr)) {
+		*start = (void*) heap_descr.chunk_access.chunk_begin;
+		*end = (void*) (heap_descr.chunk_access.chunk_begin
+				+ heap_descr.chunk_access.chunk_size);
+		*size = (size_t) heap_descr.chunk_access.chunk_size;
+		return true;
+	}
+
 	StackAddressDescription stack_descr;
 	if(GetStackAddressInformation(addr, 1, &stack_descr)) {
 		uptr off = stack_descr.addr - stack_descr.offset;
 
 		InternalMmapVector<StackVarDescr> vars(16);
+
+		// argv[i] => stack_descr.frame_descr == NULL
+		if(!stack_descr.frame_descr) {
+			Printf("AddressSanitizer can't parse the stack frame "
+			       "descriptor.\n");
+			return false;
+		}
+
 		if(!ParseFrameDescription(stack_descr.frame_descr, &vars)) {
 			Printf("AddressSanitizer can't parse the stack frame "
 			       "descriptor: |%s|\n", stack_descr.frame_descr);
@@ -564,8 +582,10 @@ static bool __asan_get_address_info(void* ptr, void** start, void** end, size_t*
 		for (uptr i = 0; i < n_objects; i++) {
 			StackVarDescr& var = vars[i];
 			uptr a = stack_descr.offset;
-			uptr prev_var_end = i ? vars[i - 1].beg + vars[i - 1].size : 0;
-			uptr next_var_beg = i + 1 < n_objects ? vars[i + 1].beg : ~(0UL);
+			uptr prev_var_end = i ? vars[i - 1].beg
+					+ vars[i - 1].size : 0;
+			uptr next_var_beg = i + 1 < n_objects ? vars[i + 1].beg
+					: ~(0UL);
 			uptr var_end = var.beg + var.size;
 			uptr addr_end = a + 1;
 			bool found = false;
@@ -576,12 +596,14 @@ static bool __asan_get_address_info(void* ptr, void** start, void** end, size_t*
 					found = true;
 				else if(a < var_end) // "partially overflows"
 					found = true;
-				else if(addr_end <= next_var_beg && next_var_beg - addr_end >= a - var_end) // "overflows"
+				else if(addr_end <= next_var_beg &&
+						next_var_beg - addr_end >= a - var_end) // "overflows"
 					found = true;
 			} else {
 				if(addr_end > var.beg) // "partially underflows"
 					found = true;
-				else if(a >= prev_var_end && a - prev_var_end >= var.beg - addr_end) // "underflows"
+				else if(a >= prev_var_end &&
+						a - prev_var_end >= var.beg - addr_end) // "underflows"
 					found = true;
 			}
 			if(found) {
@@ -594,25 +616,25 @@ static bool __asan_get_address_info(void* ptr, void** start, void** end, size_t*
 		return true;
 	}
 
-	HeapAddressDescription heap_descr;
-	if(GetHeapAddressInformation(addr, 1, &heap_descr)) {
-		*start = (void*) heap_descr.chunk_access.chunk_begin;
-		*end = (void*) (heap_descr.chunk_access.chunk_begin + heap_descr.chunk_access.chunk_size);
-		*size = (size_t) heap_descr.chunk_access.chunk_size;
-		return true;
-	}
-
 	Printf("Unsupported [unknown]\n");
 	return false;
 }
 
 extern "C" {
 
+SANITIZER_INTERFACE_ATTRIBUTE
 size_t _size(void* p)
 {
 	void* start;
 	void* end;
 	size_t size;
+
+	CHECK(!asan_init_is_running);
+	if (UNLIKELY(!asan_inited)) {
+		AsanInitFromRtl();
+	}
+
+	ENABLE_FRAME_POINTER;
 
 	asanThreadRegistry().Lock();
 	bool ok = __asan_get_address_info(p, &start, &end, &size);
@@ -621,11 +643,19 @@ size_t _size(void* p)
 	return ok ? size : SIZE_MAX;
 }
 
+SANITIZER_INTERFACE_ATTRIBUTE
 ssize_t _size_left(void* p)
 {
 	void* start;
 	void* end;
 	size_t size;
+
+	CHECK(!asan_init_is_running);
+	if (UNLIKELY(!asan_inited)) {
+		AsanInitFromRtl();
+	}
+
+	ENABLE_FRAME_POINTER;
 
 	asanThreadRegistry().Lock();
 	bool ok = __asan_get_address_info(p, &start, &end, &size);
@@ -634,11 +664,19 @@ ssize_t _size_left(void* p)
 	return ok ? (ssize_t) ((char*)p - (char*)start) : SSIZE_MAX;
 }
 
+SANITIZER_INTERFACE_ATTRIBUTE
 ssize_t _size_right(void* p)
 {
 	void* start;
 	void* end;
 	size_t size;
+
+	CHECK(!asan_init_is_running);
+	if (UNLIKELY(!asan_inited)) {
+		AsanInitFromRtl();
+	}
+
+	ENABLE_FRAME_POINTER;
 
 	asanThreadRegistry().Lock();
 	bool ok = __asan_get_address_info(p, &start, &end, &size);
