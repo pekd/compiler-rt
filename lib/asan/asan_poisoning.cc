@@ -175,6 +175,32 @@ void __asan_unpoison_memory_region(void const volatile *addr, uptr size) {
   }
 }
 
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
+uptr _size_right(uptr addr) {
+  CHECK(!asan_init_is_running);
+  if (UNLIKELY(!asan_inited)) {
+    AsanInitFromRtl();
+  }
+
+  if (!AddrIsInMem(addr)) return 0;
+  uptr aligned = RoundUpTo(addr, SHADOW_GRANULARITY);
+  uptr shadow = MemToShadow(aligned);
+  uptr alt = aligned >> 3;
+  uptr end = aligned;
+  char *shadow_ptr = (char *)shadow;
+  for (uptr p = addr; p < aligned; p++)
+    if (__asan::AddressIsPoisoned(p))
+      return p - addr;
+  while (AddrIsInMem(end) && !*shadow_ptr) {
+    shadow_ptr++;
+    end += 8;
+  }
+  for (uptr p = end; p < end + 8; p++)
+    if (__asan::AddressIsPoisoned(p))
+      return p - addr;
+  UNREACHABLE("address was poisoned, but start not found");
+}
+
 int __asan_address_is_poisoned(void const volatile *addr) {
   return __asan::AddressIsPoisoned((uptr)addr);
 }
