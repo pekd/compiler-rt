@@ -12,6 +12,12 @@
 // Main file of the ASan run-time library.
 //===----------------------------------------------------------------------===//
 
+#include <cstdio>
+#include <stdlib.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/mman.h>
+
 #include "asan_activation.h"
 #include "asan_allocator.h"
 #include "asan_interceptors.h"
@@ -487,6 +493,36 @@ static void AsanInitInternal() {
   if (flags()->sleep_after_init) {
     Report("Sleeping for %d second(s)\n", flags()->sleep_after_init);
     SleepForSeconds(flags()->sleep_after_init);
+  }
+
+  // initialize stack memory
+  FILE* statfile = fopen("/proc/self/stat", "rt");
+  if(!statfile) {
+    Printf("Cannot read /proc/self/stat");
+  } else {
+    long startstack;
+    fscanf(statfile, "%*d (%*[^)]) %*c %*d %*d %*d %*d %*d %*u %*lu %*lu %*lu "
+		     "%*lu %*lu %*lu %*ld %*ld %*ld %*ld %*ld %*ld %*llu %*lu "
+		     "%*ld %*lu %*lu %*lu %lu", &startstack);
+    fclose(statfile);
+
+    // find highest stack page
+    uptr stack = (uptr)startstack & ~4095;
+    VReport(1, "Searching for stack top from %p\n", stack);
+    while(1) {
+      unsigned char tmp[1];
+      if(mincore((void *)stack, 4096, tmp) == -1) {
+        if(errno == ENOMEM) {
+	  break;
+	} else {
+	  Printf("Error finding stack bottom: %d\n", errno);
+	  return;
+	}
+      }
+      stack += 4096;
+    }
+    VReport(1, "stack top: %p\n", stack);
+    __asan_poison_stack_memory(stack, 4096);
   }
 }
 
