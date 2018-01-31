@@ -191,10 +191,23 @@ uptr _size_right(uptr addr) {
   for (uptr p = addr; p < aligned; p++)
     if (__asan::AddressIsPoisoned(p))
       return p - addr;
+#if 1
+  u16 *shadow_i16ptr = (u16 *)shadow_ptr;
+  while (AddrIsInMem(end) && !*shadow_i16ptr) {
+    shadow_i16ptr++;
+    end += 16;
+  }
+  shadow_ptr = (char *)shadow_i16ptr;
+  if (!*shadow_ptr) {
+    shadow_ptr++;
+    end += 8;
+  }
+#else
   while (AddrIsInMem(end) && !*shadow_ptr) {
     shadow_ptr++;
     end += 8;
   }
+#endif
   for (uptr p = end; p < end + 8; p++)
     if (__asan::AddressIsPoisoned(p))
       return p - addr;
